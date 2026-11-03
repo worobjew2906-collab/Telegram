@@ -1,0 +1,55 @@
+name: Build TG Work APK (13.1.1)
+on:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Apply TG Work patch
+        run: git apply --whitespace=nowarn tgwork.patch
+
+      - name: Insert your API keys
+        run: |
+          sed -i "s/public static int APP_ID = 4;/public static int APP_ID = ${{ secrets.APP_ID }};/" TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java
+          sed -i "s/public static String APP_HASH = \"[0-9a-f]*\";/public static String APP_HASH = \"${{ secrets.APP_HASH }}\";/" TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java
+          grep -n "APP_ID =\|APP_HASH =" TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java | sed 's/\"[0-9a-f]\{6,\}\"/"***"/'
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install Android SDK parts
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;27.2.12479018" "cmake;3.22.1" "build-tools;36.0.0" "platforms;android-36"
+
+      - name: Build APK
+        run: |
+          chmod +x gradlew
+          ./gradlew :TMessagesProj_App:assembleAfatRelease --no-daemon
+
+      - name: Sign APK
+        run: |
+          BT="$ANDROID_HOME/build-tools/36.0.0"
+          if [ -n "${{ secrets.KEYSTORE_BASE64 }}" ]; then
+            echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > release.jks
+            STOREPASS="${{ secrets.KEYSTORE_PASSWORD }}"; ALIAS="${{ secrets.KEY_ALIAS }}"
+          else
+            echo "::warning::KEYSTORE_BASE64 не задан: создан временный ключ"
+            STOREPASS=temporary123; ALIAS=tgwork
+            keytool -genkeypair -keystore release.jks -alias $ALIAS -keyalg RSA -keysize 2048 -validity 10000 -storepass $STOREPASS -keypass $STOREPASS -dname "CN=tgwork"
+          fi
+          APK=$(ls TMessagesProj_App/build/outputs/apk/afat/release/*.apk | head -1)
+          "$BT/zipalign" -p -f 4 "$APK" aligned.apk
+          "$BT/apksigner" sign --ks release.jks --ks-key-alias "$ALIAS" --ks-pass "pass:$STOREPASS" --key-pass "pass:$STOREPASS" --out tgwork-signed.apk aligned.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tgwork-apk
+          path: tgwork-signed.apk
